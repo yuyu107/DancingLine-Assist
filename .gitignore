@@ -1,0 +1,19 @@
+# Runtime reports and local game data
+AutoPlay-*.txt
+SkinDemo-*.txt
+*.log
+*.dll
+*.exe
+*.dat
+*.zip
+*.assets
+*.resS
+*_Data/
+upload/
+inspect/
+output/
+bin/
+obj/
+.vs/
+.env
+.env.*
