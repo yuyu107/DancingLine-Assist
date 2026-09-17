@@ -55,6 +55,13 @@ public sealed class AutoPlayer : IDisposable {
  string Name(long p){
   try{long k=Q(p);if(Q(k+0x78)!=k)return null;return Text(Q(k+0x10));}catch{return null;}
  }
+ // Some skins use a concrete GameCharacter subclass. It keeps the inherited
+ // gameplay layout, but an exact type-name check would otherwise leave the
+ // scheduler permanently waiting without ever sending an input.
+ bool IsSupportedPlayer(long p){
+  string n=Name(p);return n=="GameCharacter"||n=="GameCharacterClassic";
+ }
+ long CurrentPlayer(){return TryQ(TryQ(TryQ(module+0x1a0e260)+0xb8)+8);}
  string Text(long p){var bytes=new List<byte>();for(int j=0;j<192;j++){byte c=B(p+j);if(c==0)return Encoding.UTF8.GetString(bytes.ToArray());bytes.Add(c);}return null;}
  bool IsHintPoint(long k){
   bool result;if(targetTypes.TryGetValue(k,out result))return result;
