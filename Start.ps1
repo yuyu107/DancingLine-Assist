@@ -6,11 +6,11 @@ Add-Type -Path (Join-Path $PSScriptRoot 'AutoPlayer.cs')
 [Windows.Forms.Application]::EnableVisualStyles()
 $auto=New-Object AutoPlayer
 $form=New-Object Windows.Forms.Form
-$form.Text='跳舞的线 · 引导线与自动游玩 0.4.7.1 转向精度实验版'
+$form.Text='跳舞的线 · 引导线与自动游玩 0.4.9 怀旧皮肤兼容测试版'
 $form.ClientSize=New-Object Drawing.Size(640,455)
 $form.StartPosition='CenterScreen';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false
 $label=New-Object Windows.Forms.Label
-$label.Text="引导线已通过实测；自动游玩仍在实验阶段，尚未验证通关。`r`n先开启免费引导线，进入关卡后先识别，再启动自动游玩并手动开始。"
+$label.Text="支持普通角色及怀旧皮肤角色；自动游玩仍在实验阶段。`r`n先开启免费引导线，进入关卡后先识别，再启动自动游玩并手动开始。"
 $label.SetBounds(20,15,600,50);$form.Controls.Add($label)
 $state=New-Object Windows.Forms.Label
 $state.Text='等待操作';$state.SetBounds(20,295,600,85);$form.Controls.Add($state)
