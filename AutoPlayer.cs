@@ -23,6 +23,9 @@ public sealed class AutoPlayer : IDisposable {
   [FieldOffset(12)] public uint flags;
  }
  IntPtr handle; Process process; long module,player,level,sound,manager,eventRoot; Thread worker;
+ public int InputLeadMilliseconds { get; set; }
+ public bool SkipStraightLandingMarkers { get; set; }
+ int landingIndex=-1; float landingClock;
  int alignmentIndex=-1;
  V3 lastGeometry; bool haveGeometry; long geometryMs,teleportUntil; readonly Stopwatch geometryWatch=Stopwatch.StartNew();
  Stopwatch airborneWatch; bool worldLayoutValid; bool playerBound;
@@ -109,7 +112,7 @@ public sealed class AutoPlayer : IDisposable {
  long Singleton(long rva){long mi=Q(module+rva);long klass=Q(Q(Q(mi+0x20)+0xc0));return Q(Q(klass+0xb8));}
  public string Scan(){
   if(Running)throw new Exception("请先停止自动游玩。");
-  Disconnect();invalidated=true;playerBound=false;player=0;level=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.5");
+  Disconnect();invalidated=true;playerBound=false;player=0;level=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.7.1");
   if(IntPtr.Size!=8)throw new Exception("需要 64 位 PowerShell。");
   var ps=Process.GetProcessesByName("Dancing Line");if(ps.Length!=1)throw new Exception("请只打开一个社区版游戏。");process=ps[0];
   var m=process.Modules.Cast<ProcessModule>().FirstOrDefault(x=>x.ModuleName.Equals("GameAssembly.dll",StringComparison.OrdinalIgnoreCase));
@@ -223,13 +226,28 @@ public sealed class AutoPlayer : IDisposable {
   player=candidate;playerBound=true;Log("PLAYER BOUND "+player.ToString("X")+" level="+level.ToString("X"));return true;
  }
  public bool PollSelection(){if(Running||invalidated||times.Count<2)return false;return !SelectionValid();}
+ bool IsStraightLanding(float clock,int index,V3 pos,V3 goal,V3 d,double len,double forward,double lateral){
+  if(!SkipStraightLandingMarkers||landingIndex!=index||clock<landingClock||clock-landingClock>0.35f||index+1>=times.Count)return false;
+  if(forward< -0.5||Math.Abs(lateral)>0.4||Math.Abs(goal.y-pos.y)>0.8)return false;
+  float gap=times[index+1]-times[index];if(gap<0.08f||gap>1.5f)return false;
+  long obj;if(!pointObjects.TryGetValue(times[index+1],out obj)||Q(obj+0x18)!=level)return false;
+  long tr=ComponentTransform(obj);
+  if(I(tr+0x20)!=2||Name(Q(tr+0x28))!="Transform")return false;
+  V3 follow=World(tr);double sx=follow.x-goal.x,sz=follow.z-goal.z,span=Math.Sqrt(sx*sx+sz*sz);
+  if(span<0.8||Math.Abs(follow.y-goal.y)>0.8)return false;
+  double cos=(sx*d.x+sz*d.z)/(span*len);
+  double fx=follow.x-pos.x,fz=follow.z-pos.z;
+  double ahead=(fx*d.x+fz*d.z)/len,side=(fx*d.z-fz*d.x)/len;
+  Log("LANDING CHECK index="+index+" cosine="+cos+" nextAhead="+ahead+" nextLateral="+side+" gap="+gap);
+  return cos>=0.995&&ahead>0.8&&Math.Abs(side)<=0.4;
+ }
  bool PositionDue(float clock,float target,int index){
   if(B(player+0x10b)==0||B(player+0x28)!=0){
    if(airborneWatch==null){airborneWatch=Stopwatch.StartNew();Log("AIRBORNE WAIT index="+index+" clock="+clock);}
    if(airborneWatch.ElapsedMilliseconds>15000)throw new Exception("等待落地超过 15 秒，已停止，请导出日志。");
    return false;
   }
-  if(airborneWatch!=null){Log("LANDED index="+index+" clock="+clock+" waitMs="+airborneWatch.ElapsedMilliseconds);airborneWatch=null;}
+  if(airborneWatch!=null){landingIndex=airborneWatch.ElapsedMilliseconds>=100?index:-1;landingClock=clock;Log("LANDED index="+index+" clock="+clock+" waitMs="+airborneWatch.ElapsedMilliseconds);airborneWatch=null;}
   if(clock<target-0.5f)return false;
   if(clock>target+0.5f)throw new Exception("等待当前位置与引导点对齐超时，已停止，请导出日志。");
   long hero=Q(player+0xc8),tr=Q(hero+0x170),native=Q(tr+0x10),obj;
@@ -257,15 +275,23 @@ public sealed class AutoPlayer : IDisposable {
   double forward=(dx*d.x+dz*d.z)/len,lateral=(dx*d.z-dz*d.x)/len;
   float speed=F(player+0x128);
   if(float.IsNaN(speed)||speed<=0||speed>100)throw new Exception("移动速度异常。");
-  // Ordinary diagonal movement: heroSpeed is the per-axis scale; allow 20ms input lead.
-  double lead=Math.Min(0.4,speed*Math.Sqrt(2)*0.020);
-  if(Math.Abs(lateral)>1.0||forward< -0.7){
+  // Ordinary diagonal movement: configurable input lead; does not shift the time window.
+  double lead=Math.Min(0.4,speed*Math.Sqrt(2)*InputLeadMilliseconds/1000.0);
+  // Small boundary allowance only for the current point within 0.5s of landing.
+  bool recentLanding=landingIndex==index&&clock>=landingClock&&clock-landingClock<=0.5f;
+  double lateralLimit=recentLanding?1.05:1.0;
+  if(Math.Abs(lateral)>lateralLimit||forward< -0.7){
    if(alignmentIndex!=index){alignmentIndex=index;Log("ALIGNMENT WAIT index="+index+" clock="+clock+" deadline="+(target+0.5f)+" forward="+forward+" lateral="+lateral);}
    return false;
   }
   if(alignmentIndex==index){Log("ALIGNMENT READY index="+index+" clock="+clock+" forward="+forward+" lateral="+lateral);alignmentIndex=-1;}
   if(forward>lead)return false;
   if(B(player+0x108)==0||B(player+0x10b)==0||B(player+0x28)!=0)throw new Exception("到达转向位置但角色暂不能转向，已停止。");
+  if(IsStraightLanding(clock,index,pos,goal,d,len,forward,lateral)){
+   Log("LANDING PASS index="+index+" time="+times[index]+" clock="+clock+" forward="+forward+" lateral="+lateral+" reason=next_point_straight_after_landing");
+   next=index+1;landingIndex=-1;alignmentIndex=-1;haveGeometry=false;return false;
+  }
+  if(Math.Abs(lateral)>1.0)Log("LANDING EDGE ALLOW index="+index+" lateral="+lateral+" limit="+lateralLimit+" sinceLanding="+(clock-landingClock));
   Log("POSITION TRIGGER index="+index+" clock="+clock+" target="+target+" forward="+forward+" lateral="+lateral+" lead="+lead);
   return true;
  }
@@ -273,13 +299,14 @@ public sealed class AutoPlayer : IDisposable {
   if(Running)throw new Exception("自动游玩已经运行。");
   if(!worldLayoutValid)throw new Exception("位置模式需要匹配的 UnityPlayer 版本，请先识别。");
   if(invalidated||times.Count<2||handle==IntPtr.Zero)throw new Exception("请先识别当前关卡。");
+  if(InputLeadMilliseconds<0||InputLeadMilliseconds>40)throw new Exception("按键提前量必须在 0 至 40 毫秒之间。");
   if(offsetMs< -500||offsetMs>100)throw new Exception("偏移超出范围。");
   if(!SelectionValid())throw new Exception(status);
-  alignmentIndex=-1;airborneWatch=null;haveGeometry=false;teleportUntil=0;stop=false;next=0;previous=Clock();while(next<times.Count&&times[next]+offsetMs/1000f<previous-0.04f)next++;
+  landingIndex=-1;alignmentIndex=-1;airborneWatch=null;haveGeometry=false;teleportUntil=0;stop=false;next=0;previous=Clock();while(next<times.Count&&times[next]+offsetMs/1000f<previous-0.04f)next++;
   worker=new Thread(()=>Loop(offsetMs)){IsBackground=true};worker.Start();
  }
  void Loop(int offsetMs){
-  Log("START offsetMs="+offsetMs);status="等待游戏前台并开始/继续关卡；F8 停止。";
+  Log("START offsetMs="+offsetMs+" skipStraightLanding="+SkipStraightLandingMarkers+" inputLeadMs="+InputLeadMilliseconds);status="等待游戏前台并开始/继续关卡；F8 停止。";
   var heartbeat=Stopwatch.StartNew();long lastSample=-1000;string lastGate=null;
   try{
    while(!stop){
@@ -292,7 +319,7 @@ public sealed class AutoPlayer : IDisposable {
      Thread.Sleep(10);continue;
     }
     float t=Clock();
-    if(t<previous-0.2f){haveGeometry=false;teleportUntil=0;airborneWatch=null;next=0;while(next<times.Count&&times[next]+offsetMs/1000f<t-0.04f)next++;Log("Timeline reset at "+t);}
+    if(t<previous-0.2f){landingIndex=-1;haveGeometry=false;teleportUntil=0;airborneWatch=null;next=0;while(next<times.Count&&times[next]+offsetMs/1000f<t-0.04f)next++;Log("Timeline reset at "+t);}
     previous=t;
     bool fg=Foreground();byte ps=B(player+0x9c),pp=B(player+0x9d),ls=B(level+0x1a9),lp=B(level+0x1ab);
     string gate=!fg?"游戏不在前台":ps==0?"角色 started=0":pp!=0?"角色 paused="+pp:ls==0?"关卡 started=0":lp!=0?"关卡 paused="+lp:"ready";
