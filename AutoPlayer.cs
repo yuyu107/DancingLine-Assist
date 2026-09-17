@@ -112,7 +112,7 @@ public sealed class AutoPlayer : IDisposable {
  long Singleton(long rva){long mi=Q(module+rva);long klass=Q(Q(Q(mi+0x20)+0xc0));return Q(Q(klass+0xb8));}
  public string Scan(){
   if(Running)throw new Exception("请先停止自动游玩。");
-  Disconnect();invalidated=true;playerBound=false;player=0;level=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.7.1");
+  Disconnect();invalidated=true;playerBound=false;player=0;level=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.9");
   if(IntPtr.Size!=8)throw new Exception("需要 64 位 PowerShell。");
   var ps=Process.GetProcessesByName("Dancing Line");if(ps.Length!=1)throw new Exception("请只打开一个社区版游戏。");process=ps[0];
   var m=process.Modules.Cast<ProcessModule>().FirstOrDefault(x=>x.ModuleName.Equals("GameAssembly.dll",StringComparison.OrdinalIgnoreCase));
@@ -211,7 +211,7 @@ public sealed class AutoPlayer : IDisposable {
  bool SelectionValid(){
   if(invalidated||handle==IntPtr.Zero||times.Count<2)return false;
   try{
-   if(process.HasExited||(playerBound&&(Q(Q(Q(module+0x1a0e260)+0xb8)+8)!=player||Q(player+0x30)!=level))||Q(manager+0x58)!=eventRoot||Q(level+0x10)!=levelNative||Q(sound+0x10)!=soundNative||Q(level+0x80)!=sound||Q(level+0x180)!=sceneNameRef){
+   if(process.HasExited||(playerBound&&(CurrentPlayer()!=player||Q(player+0x30)!=level))||Q(manager+0x58)!=eventRoot||Q(level+0x10)!=levelNative||Q(sound+0x10)!=soundNative||Q(level+0x80)!=sound||Q(level+0x180)!=sceneNameRef){
     invalidated=true;status="关卡数据已变化或卸载，旧时间表已禁用，请重新识别。";Log("INVALIDATED selection changed");return false;
    }
    return true;
@@ -315,7 +315,7 @@ public sealed class AutoPlayer : IDisposable {
     if(!SelectionValid())break;
     if(!BindPlayer()){
      status="时间表已准备，等待手动开始并绑定玩家；F8 停止。";
-     if(heartbeat.ElapsedMilliseconds-lastSample>=1000){Log("WAIT BIND level="+level.ToString("X")+" currentPlayer="+TryQ(TryQ(TryQ(module+0x1a0e260)+0xb8)+8).ToString("X"));lastSample=heartbeat.ElapsedMilliseconds;}
+     if(heartbeat.ElapsedMilliseconds-lastSample>=1000){long probe=CurrentPlayer();Log("WAIT BIND level="+level.ToString("X")+" currentPlayer="+probe.ToString("X")+" type="+Name(probe)+" playerLevel="+(IsSupportedPlayer(probe)?TryQ(probe+0x30):0).ToString("X"));lastSample=heartbeat.ElapsedMilliseconds;}
      Thread.Sleep(10);continue;
     }
     float t=Clock();
