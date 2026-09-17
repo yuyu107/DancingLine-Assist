@@ -6,7 +6,7 @@ Add-Type -Path (Join-Path $PSScriptRoot 'AutoPlayer.cs')
 [Windows.Forms.Application]::EnableVisualStyles()
 $auto=New-Object AutoPlayer
 $form=New-Object Windows.Forms.Form
-$form.Text='跳舞的线 · 引导线与自动游玩 0.4.9 怀旧皮肤兼容测试版'
+$form.Text='跳舞的线 · 引导线与自动游玩 0.4.14 补充转角测试版'
 $form.ClientSize=New-Object Drawing.Size(640,455)
 $form.StartPosition='CenterScreen';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false
 $label=New-Object Windows.Forms.Label
