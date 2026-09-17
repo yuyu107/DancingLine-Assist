@@ -30,7 +30,7 @@ public sealed class AutoPlayer : IDisposable {
  V3 lastGeometry; bool haveGeometry; long geometryMs,teleportUntil; readonly Stopwatch geometryWatch=Stopwatch.StartNew();
  Stopwatch airborneWatch; bool worldLayoutValid; bool playerBound;
  volatile bool invalidated; long levelNative,soundNative,sceneNameRef;
- volatile bool stop; volatile string status="尚未识别关卡。"; bool held; int next; float previous;
+ volatile bool stop; volatile string status="尚未识别关卡。"; bool held,bridgeTurn; int next; float previous,clockBias;
  readonly List<float> times=new List<float>(); readonly HashSet<long> visited=new HashSet<long>();
  readonly Dictionary<float,long> pointObjects=new Dictionary<float,long>();
  readonly Dictionary<long,bool> targetTypes=new Dictionary<long,bool>();
@@ -55,7 +55,7 @@ public sealed class AutoPlayer : IDisposable {
  string Name(long p){
   try{long k=Q(p);if(Q(k+0x78)!=k)return null;return Text(Q(k+0x10));}catch{return null;}
  }
- // Some skins use a concrete GameCharacter subclass. It keeps the inherited
+ // Some skins use a concrete GameCharacter subclass.  It keeps the inherited
  // gameplay layout, but an exact type-name check would otherwise leave the
  // scheduler permanently waiting without ever sending an input.
  bool IsSupportedPlayer(long p){
@@ -119,7 +119,7 @@ public sealed class AutoPlayer : IDisposable {
  long Singleton(long rva){long mi=Q(module+rva);long klass=Q(Q(Q(mi+0x20)+0xc0));return Q(Q(klass+0xb8));}
  public string Scan(){
   if(Running)throw new Exception("请先停止自动游玩。");
-  Disconnect();invalidated=true;playerBound=false;player=0;level=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.9");
+  Disconnect();invalidated=true;playerBound=false;player=0;level=0;clockBias=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.10");
   if(IntPtr.Size!=8)throw new Exception("需要 64 位 PowerShell。");
   var ps=Process.GetProcessesByName("Dancing Line");if(ps.Length!=1)throw new Exception("请只打开一个社区版游戏。");process=ps[0];
   var m=process.Modules.Cast<ProcessModule>().FirstOrDefault(x=>x.ModuleName.Equals("GameAssembly.dll",StringComparison.OrdinalIgnoreCase));
@@ -134,8 +134,8 @@ public sealed class AutoPlayer : IDisposable {
    if(unityModule!=null){using(var f=File.OpenRead(unityModule.FileName))using(var sha=SHA256.Create())worldLayoutValid=BitConverter.ToString(sha.ComputeHash(f)).Replace("-","").ToLowerInvariant()=="42e16d65341f4036ca6959e5dad65ae48fb94f464ec77c680e71c3fed5ac2ce2";}
    Log("WORLD layoutHashMatches="+worldLayoutValid);
    scanClock=Stopwatch.StartNew();
-   stage="optional player";player=TryQ(TryQ(TryQ(module+0x1a0e260)+0xb8)+8);
-   Log("Player at scan="+player.ToString("X")+" type="+Name(player));
+   stage="optional player";player=CurrentPlayer();
+   Log("Player at scan="+player.ToString("X")+" type="+Name(player)+" playerLevel="+(IsSupportedPlayer(player)?TryQ(player+0x30):0).ToString("X"));
    stage="hint manager";manager=Singleton(0x1a1bf70);Log(stage+"="+manager.ToString("X")+" type="+Name(manager));
    stage="hint subscribers";eventRoot=Q(manager+0x58);Log(stage+"="+eventRoot.ToString("X"));
    Walk(eventRoot,0);
@@ -160,7 +160,8 @@ public sealed class AutoPlayer : IDisposable {
   }catch(Exception ex){times.Clear();status=ex.Message;Log("SCAN ERROR stage="+stage+" "+ex.ToString());throw;}
   finally{scanClock=null;}
  }
- float Clock(){stage="music clock";float t=(F(sound+0xac)-F(sound+0x60)+F(level+0x114))*F(level+0x28);if(float.IsNaN(t)||float.IsInfinity(t)||t< -120||t>7200)throw new Exception("游戏时间异常。");return t;}
+ float RawClock(){stage="music clock";float t=(F(sound+0xac)-F(sound+0x60)+F(level+0x114))*F(level+0x28);if(float.IsNaN(t)||float.IsInfinity(t)||t< -120||t>7200)throw new Exception("游戏时间异常。");return t;}
+ float Clock(){return RawClock()+clockBias;}
  string Vec(long address){var b=Read(address,12);return string.Join(",",new[]{BitConverter.ToSingle(b,0),BitConverter.ToSingle(b,4),BitConverter.ToSingle(b,8)}.Select(v=>v.ToString("R",System.Globalization.CultureInfo.InvariantCulture)).ToArray());}
  struct V3 {
   public float x,y,z;
@@ -226,10 +227,16 @@ public sealed class AutoPlayer : IDisposable {
  }
  bool BindPlayer(){
   if(playerBound)return true;
-  long candidate=TryQ(TryQ(TryQ(module+0x1a0e260)+0xb8)+8);
-  if(!Ptr(candidate)||Name(candidate)!="GameCharacter"||TryQ(candidate+0x30)!=level)return false;
+  long candidate=CurrentPlayer();
+  if(!Ptr(candidate)||!IsSupportedPlayer(candidate)||TryQ(candidate+0x30)!=level)return false;
   // Wait until actual gameplay before binding, so menu/player creation may finish safely.
   if(B(candidate+0x9c)==0||B(level+0x1a9)==0)return false;
+  float raw=RawClock(),characterTime=F(candidate+0x138),difference=characterTime-raw;
+  // Most levels share the soundtrack clock. A few start movement roughly one
+  // second before it, which otherwise makes the first turn impossible.
+  if(!float.IsNaN(characterTime)&&!float.IsInfinity(characterTime)&&Math.Abs(difference)>=0.5f&&Math.Abs(difference)<=2.0f){
+   clockBias=difference;Log("CLOCK CALIBRATION raw="+raw+" playerTime="+characterTime+" bias="+clockBias);
+  }else{clockBias=0;Log("CLOCK CALIBRATION not needed raw="+raw+" playerTime="+characterTime+" difference="+difference);}
   player=candidate;playerBound=true;Log("PLAYER BOUND "+player.ToString("X")+" level="+level.ToString("X"));return true;
  }
  public bool PollSelection(){if(Running||invalidated||times.Count<2)return false;return !SelectionValid();}
@@ -254,9 +261,10 @@ public sealed class AutoPlayer : IDisposable {
    if(airborneWatch.ElapsedMilliseconds>15000)throw new Exception("等待落地超过 15 秒，已停止，请导出日志。");
    return false;
   }
-  if(airborneWatch!=null){landingIndex=airborneWatch.ElapsedMilliseconds>=100?index:-1;landingClock=clock;Log("LANDED index="+index+" clock="+clock+" waitMs="+airborneWatch.ElapsedMilliseconds);airborneWatch=null;}
-  if(clock<target-0.5f)return false;
-  if(clock>target+0.5f)throw new Exception("等待当前位置与引导点对齐超时，已停止，请导出日志。");
+ if(airborneWatch!=null){landingIndex=airborneWatch.ElapsedMilliseconds>=100?index:-1;landingClock=clock;Log("LANDED index="+index+" clock="+clock+" waitMs="+airborneWatch.ElapsedMilliseconds);airborneWatch=null;}
+  bool calibratedRoute=clockBias>=0.5f;
+  bool beforeHintWindow=clock<target-0.5f;
+  if(beforeHintWindow&&!calibratedRoute)return false;
   long hero=Q(player+0xc8),tr=Q(hero+0x170),native=Q(tr+0x10),obj;
   if(Name(tr)!="Transform"||ComponentTransform(hero)!=native)throw new Exception("角色坐标引用不一致。");
   if(!pointObjects.TryGetValue(times[index],out obj))throw new Exception("缺少对应引导点。");
@@ -280,6 +288,32 @@ public sealed class AutoPlayer : IDisposable {
   if(Math.Abs(goal.y-pos.y)>2)return false;
   double dx=goal.x-pos.x,dz=goal.z-pos.z;
   double forward=(dx*d.x+dz*d.z)/len,lateral=(dx*d.z-dz*d.x)/len;
+  // This level family begins movement before the hint timestamp stream.  When
+  // that one-second start-clock calibration was confirmed, keep using world
+  // geometry for this route instead of arbitrarily limiting the correction to
+  // its first few markers.
+  // Some custom route pieces contain an unmarked second bend.  If the next
+  // known guide lies far to one side but its projection is the immediate
+  // corner ahead, press once without consuming that next guide point.
+  bool bridge=calibratedRoute&&beforeHintWindow&&Math.Abs(goal.y-pos.y)<=1.0&&
+   Math.Abs(lateral)>=12.0&&forward>=0&&forward<=0.65;
+  if(bridge){
+   bridgeTurn=true;Log("CALIBRATED BRIDGE TURN index="+index+" clock="+clock+" target="+target+" forward="+forward+" lateral="+lateral);
+   alignmentIndex=-1;return true;
+  }
+  // A few custom levels start with a corner before the soundtrack's first
+  // normal hint timing.  The first marker is then intentionally to the side
+  // of the starting segment, so ordinary alignment must not treat it as a
+  // malformed route.  Keep this exception narrowly limited to that first,
+  // very early cross-turn and require the character to be at its corner.
+  bool initialCrossTurn=calibratedRoute&&!beforeHintWindow&&clock<=target+2.0f&&
+   Math.Abs(goal.y-pos.y)<=1.0&&Math.Abs(lateral)>=2.0&&Math.Abs(forward)<=0.65;
+  if(initialCrossTurn){
+   Log("CALIBRATED CROSS TURN index="+index+" clock="+clock+" target="+target+" forward="+forward+" lateral="+lateral);
+   alignmentIndex=-1;return true;
+  }
+  float deadline=target+(calibratedRoute?2.0f:0.5f);
+  if(clock>deadline)throw new Exception("等待当前位置与引导点对齐超时，已停止，请导出日志。");
   float speed=F(player+0x128);
   if(float.IsNaN(speed)||speed<=0||speed>100)throw new Exception("移动速度异常。");
   // Ordinary diagonal movement: configurable input lead; does not shift the time window.
@@ -288,7 +322,7 @@ public sealed class AutoPlayer : IDisposable {
   bool recentLanding=landingIndex==index&&clock>=landingClock&&clock-landingClock<=0.5f;
   double lateralLimit=recentLanding?1.05:1.0;
   if(Math.Abs(lateral)>lateralLimit||forward< -0.7){
-   if(alignmentIndex!=index){alignmentIndex=index;Log("ALIGNMENT WAIT index="+index+" clock="+clock+" deadline="+(target+0.5f)+" forward="+forward+" lateral="+lateral);}
+   if(alignmentIndex!=index){alignmentIndex=index;Log("ALIGNMENT WAIT index="+index+" clock="+clock+" deadline="+deadline+" calibratedRoute="+calibratedRoute+" forward="+forward+" lateral="+lateral);}
    return false;
   }
   if(alignmentIndex==index){Log("ALIGNMENT READY index="+index+" clock="+clock+" forward="+forward+" lateral="+lateral);alignmentIndex=-1;}
@@ -309,7 +343,7 @@ public sealed class AutoPlayer : IDisposable {
   if(InputLeadMilliseconds<0||InputLeadMilliseconds>40)throw new Exception("按键提前量必须在 0 至 40 毫秒之间。");
   if(offsetMs< -500||offsetMs>100)throw new Exception("偏移超出范围。");
   if(!SelectionValid())throw new Exception(status);
-  landingIndex=-1;alignmentIndex=-1;airborneWatch=null;haveGeometry=false;teleportUntil=0;stop=false;next=0;previous=Clock();while(next<times.Count&&times[next]+offsetMs/1000f<previous-0.04f)next++;
+  landingIndex=-1;alignmentIndex=-1;airborneWatch=null;haveGeometry=false;teleportUntil=0;bridgeTurn=false;stop=false;next=0;previous=Clock();while(next<times.Count&&times[next]+offsetMs/1000f<previous-0.04f)next++;
   worker=new Thread(()=>Loop(offsetMs)){IsBackground=true};worker.Start();
  }
  void Loop(int offsetMs){
@@ -338,6 +372,7 @@ public sealed class AutoPlayer : IDisposable {
     status="运行中："+next+" / "+times.Count+"；游戏时间 "+t.ToString("F3")+"；F8 停止。";
     if(next>=times.Count){status="本次时间点已执行完毕；可重试或停止。";Thread.Sleep(10);continue;}
     float target=times[next]+offsetMs/1000f;
+    bridgeTurn=false;
     if(PositionDue(t,target,next)){
      // Recheck foreground immediately before the key-down.
      if(!Foreground())continue;
@@ -352,7 +387,9 @@ public sealed class AutoPlayer : IDisposable {
      Key(true);
      Log("KEYUP index="+next+" heldMs="+pressWatch.ElapsedMilliseconds);
      Motion("after",next);
-     Log("Key "+next+" gameTime="+t+" target="+target);next++;
+     bool keepCurrent=bridgeTurn;bridgeTurn=false;
+     Log("Key "+next+" gameTime="+t+" target="+target+(keepCurrent?" bridge=keep_current":""));
+     if(!keepCurrent)next++;else{landingIndex=-1;alignmentIndex=-1;haveGeometry=false;}
      status="自动游玩："+next+" / "+times.Count+"；F8 停止。";
     }
     Thread.Sleep(1);
