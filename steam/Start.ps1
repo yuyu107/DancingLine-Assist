@@ -1,0 +1,46 @@
+﻿$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type -Path (Join-Path $PSScriptRoot 'AutoPlayer.cs')
+Add-Type -Path (Join-Path $PSScriptRoot 'HintMemory.cs')
+[Windows.Forms.Application]::EnableVisualStyles()
+$auto=New-Object AutoPlayer
+$form=New-Object Windows.Forms.Form
+$form.Text='跳舞的线 Steam · 引导线与自动游玩 0.2.9 双路径识别测试版'
+$form.ClientSize=New-Object Drawing.Size(640,455)
+$form.StartPosition='CenterScreen';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false
+$label=New-Object Windows.Forms.Label
+$label.Text="Steam 版引导线权限已验证。`r`n自动游玩前必须确认引导线实际显示，而不只是开关显示已开。"
+$label.SetBounds(20,15,600,50);$form.Controls.Add($label)
+$state=New-Object Windows.Forms.Label
+$state.Text='等待操作';$state.SetBounds(20,295,600,85);$form.Controls.Add($state)
+function Add-Button($text,$x,$y,$handler){
+ $b=New-Object Windows.Forms.Button;$b.Text=$text;$b.SetBounds($x,$y,185,38);$b.Add_Click($handler);$form.Controls.Add($b)
+}
+Add-Button '应用引导线设置' 20 75 {try{$mode=1;if($defaultHint.Checked){$mode=2};$state.Text=[HintMemory]::Apply($mode)}catch{$state.Text=$_.Exception.GetBaseException().Message}}
+Add-Button '恢复引导线原规则' 225 75 {try{$state.Text=[HintMemory]::Apply(0)}catch{$state.Text=$_.Exception.GetBaseException().Message}}
+$defaultHint=New-Object Windows.Forms.CheckBox
+$defaultHint.Text='进入关卡时尝试默认开启（可选；若路线未出现，需在游戏内关闭再开启）'
+$defaultHint.Checked=$false;$defaultHint.SetBounds(20,112,600,25);$form.Controls.Add($defaultHint)
+Add-Button '1. 识别当前关卡' 20 145 {try{if([HintMemory]::CurrentGuideState() -eq 0){$state.Text='自动游玩需要引导线。请先在游戏内开启，并确认路线实际出现。';return};$auto.BeginScan();$state.Text=$auto.Status}catch{$state.Text=$_.Exception.GetBaseException().Message}}
+Add-Button '2. 启动自动游玩' 225 145 {try{$auto.InputLeadMilliseconds=[int]$leadInput.Value;$auto.SkipStraightLandingMarkers=$landingFilter.Checked;$auto.Start([int]$offset.Value);$state.Text='已准备；切回游戏后手动开始或继续，F8 停止。'}catch{$state.Text=$_.Exception.GetBaseException().Message}}
+Add-Button '停止自动游玩（F8）' 430 145 {$auto.Stop();$state.Text=$auto.Status}
+$offsetLabel=New-Object Windows.Forms.Label;$offsetLabel.Text='时间窗口偏移（毫秒）';$offsetLabel.SetBounds(20,192,235,30);$form.Controls.Add($offsetLabel)
+$offset=New-Object Windows.Forms.NumericUpDown;$offset.Minimum=-500;$offset.Maximum=100;$offset.Increment=5;$offset.Value=-50;$offset.SetBounds(265,190,90,30);$form.Controls.Add($offset)
+Add-Button '导出运行日志' 430 185 {
+ try{$p=Join-Path $PSScriptRoot ('Steam-AutoPlay-test-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.txt');$auto.SaveLog($p);$state.Text='已保存：'+$p}catch{$state.Text=$_.Exception.GetBaseException().Message}
+}
+$note=New-Object Windows.Forms.Label
+$note.Text="位置模式接近引导点时发送空格；时间窗口只核对顺序。`r`n换关卡后需重新识别；关闭本窗口会停止自动按键。"
+$note.SetBounds(20,390,600,55);$form.Controls.Add($note)
+$landingFilter=New-Object Windows.Forms.CheckBox
+$landingFilter.Text='跳过直行落点提示（实验；重新启动自动游玩生效）'
+$landingFilter.Checked=$true;$landingFilter.SetBounds(20,225,590,23);$form.Controls.Add($landingFilter)
+$leadLabel=New-Object Windows.Forms.Label;$leadLabel.Text='按键提前量（毫秒；严格路段可试 5）';$leadLabel.SetBounds(20,260,330,25);$form.Controls.Add($leadLabel)
+$leadInput=New-Object Windows.Forms.NumericUpDown;$leadInput.Minimum=0;$leadInput.Maximum=40;$leadInput.Value=20;$leadInput.SetBounds(365,257,75,28);$form.Controls.Add($leadInput)
+$timer=New-Object Windows.Forms.Timer;$timer.Interval=200
+$script:wasRunning=$false
+$timer.Add_Tick({if($auto.ConsumeScanResult()){$state.Text=$auto.Status};if(-not $auto.Scanning -and $auto.PollSelection()){$state.Text=$auto.Status};if($auto.Running -or $script:wasRunning){$state.Text=$auto.Status};$script:wasRunning=$auto.Running})
+$timer.Start()
+$form.Add_FormClosing({$timer.Stop();$auto.Dispose()})
+try{[void]$form.ShowDialog()}finally{$timer.Dispose();$auto.Dispose()}
