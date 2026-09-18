@@ -7,6 +7,8 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Drawing;
+using System.Windows.Forms;
 
 public sealed class AutoPlayer : IDisposable {
  [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint a,bool b,int c);
@@ -25,12 +27,13 @@ public sealed class AutoPlayer : IDisposable {
  IntPtr handle; Process process; long module,player,level,sound,manager,eventRoot; Thread worker;
  public int InputLeadMilliseconds { get; set; }
  public bool SkipStraightLandingMarkers { get; set; }
+ public bool SkipTerminalStraightMarker { get; set; }
  int landingIndex=-1; float landingClock;
  int alignmentIndex=-1;
- V3 lastGeometry; bool haveGeometry; long geometryMs,teleportUntil; readonly Stopwatch geometryWatch=Stopwatch.StartNew();
+ V3 lastGeometry; bool haveGeometry; long geometryMs,teleportUntil; int teleportSkipIndex=-1; readonly Stopwatch geometryWatch=Stopwatch.StartNew();
  Stopwatch airborneWatch; bool worldLayoutValid; bool playerBound;
  volatile bool invalidated; long levelNative,soundNative,sceneNameRef;
- volatile bool stop; volatile string status="尚未识别关卡。"; bool held,bridgeTurn; int next; float previous,clockBias;
+ volatile bool stop,held; volatile string status="尚未识别关卡。"; bool bridgeTurn,hasScheduleProgress,scanHotkeyHeld,startHotkeyHeld; volatile int next; float previous,clockBias;
  readonly List<float> times=new List<float>(); readonly HashSet<long> visited=new HashSet<long>();
  readonly Dictionary<float,long> pointObjects=new Dictionary<float,long>();
  readonly Dictionary<long,bool> targetTypes=new Dictionary<long,bool>();
@@ -38,6 +41,8 @@ public sealed class AutoPlayer : IDisposable {
  string stage="idle"; readonly Dictionary<long,int> owners=new Dictionary<long,int>();
  int reads; Stopwatch scanClock; public string Status {get{return status;}}
  public int Count {get{return times.Count;}} public bool Running {get{return worker!=null&&worker.IsAlive;}}
+ public bool InputHeld {get{return held;}}
+ public int CurrentPoint {get{return next;}}
  void Log(string s){lock(sync){
   if(log.Length>1800000){int cut=log.ToString().IndexOf('\n',600000);if(cut>=0){log.Remove(0,cut+1);log.Insert(0,"[Earlier log entries trimmed; latest events retained]\r\n");}}
   log.AppendLine(DateTime.Now.ToString("HH:mm:ss.fff")+" "+s);
@@ -119,7 +124,7 @@ public sealed class AutoPlayer : IDisposable {
  long Singleton(long rva){long mi=Q(module+rva);long klass=Q(Q(Q(mi+0x20)+0xc0));return Q(Q(klass+0xb8));}
  public string Scan(){
   if(Running)throw new Exception("请先停止自动游玩。");
-  Disconnect();invalidated=true;playerBound=false;player=0;level=0;clockBias=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.10");
+  Disconnect();invalidated=true;playerBound=false;player=0;level=0;clockBias=0;hasScheduleProgress=false;next=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.29");
   if(IntPtr.Size!=8)throw new Exception("需要 64 位 PowerShell。");
   var ps=Process.GetProcessesByName("Dancing Line");if(ps.Length!=1)throw new Exception("请只打开一个社区版游戏。");process=ps[0];
   var m=process.Modules.Cast<ProcessModule>().FirstOrDefault(x=>x.ModuleName.Equals("GameAssembly.dll",StringComparison.OrdinalIgnoreCase));
@@ -150,8 +155,23 @@ public sealed class AutoPlayer : IDisposable {
    Log("LEVEL SOURCE hint owner="+level.ToString("X")+" playerLevel="+(Ptr(player)?TryQ(player+0x30):0).ToString("X"));
    times.Sort();
    for(int i=times.Count-1;i>0;i--)if(Math.Abs(times[i]-times[i-1])<0.001f)times.RemoveAt(i);
+   // Some custom levels leave a stale marker at the level start. It can be
+   // timestamped only one frame after a real corner, even though the two
+   // transforms are far apart. Keep genuine close double-turns, but discard
+   // only this physically impossible time/position combination.
+   if(worldLayoutValid)for(int i=times.Count-1;i>0;i--){
+    float gap=times[i]-times[i-1];if(gap>=0.08f)continue;
+    long earlier,later;if(!pointObjects.TryGetValue(times[i-1],out earlier)||!pointObjects.TryGetValue(times[i],out later))continue;
+    try{
+     V3 a=World(ComponentTransform(earlier)),b=World(ComponentTransform(later));
+     double dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z,span=Math.Sqrt(dx*dx+dy*dy+dz*dz);
+     if(span>5.0){Log("DROP DENSE REMOTE time="+times[i].ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" previous="+times[i-1].ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" gap="+gap.ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" span="+span);pointObjects.Remove(times[i]);times.RemoveAt(i);}
+    }catch(Exception ex){Log("DENSE POINT GEOMETRY unavailable "+ex.Message);}
+   }
    if(times.Count<2)throw new Exception("未识别到足够的引导点；请导出日志，不会自动按键。");
-   for(int i=1;i<times.Count;i++)if(times[i]-times[i-1]<0.04f)throw new Exception("时间点过密，实验版暂不支持，请导出日志。");
+   // A nominal 0.04-second spacing may be represented as 0.03999996 in
+   // single precision.  Treat only genuinely tighter pairs as unsupported.
+   for(int i=1;i<times.Count;i++)if(times[i]-times[i-1]<0.03f)throw new Exception("时间点过密，实验版暂不支持，请导出日志。");
    Log("TIMES "+string.Join(",",times.Select(x=>x.ToString("R",System.Globalization.CultureInfo.InvariantCulture)).ToArray()));
    levelNative=Q(level+0x10);soundNative=Q(sound+0x10);sceneNameRef=Q(level+0x180);
    if(!Ptr(levelNative)||!Ptr(soundNative))throw new Exception("关卡或音乐对象已卸载，请重新进入关卡后识别。");
@@ -212,6 +232,16 @@ public sealed class AutoPlayer : IDisposable {
   }catch(Exception ex){Log("MOTION unavailable "+ex.Message);}
  }
  bool Foreground(){uint id;GetWindowThreadProcessId(GetForegroundWindow(),out id);return id==(uint)process.Id;}
+ // F6/F7 are polled by the Windows Forms timer. Edge detection avoids repeat
+ // actions while a key remains held.
+ public bool ConsumeScanHotkey(){
+  bool down=(GetAsyncKeyState(0x75)&0x8000)!=0;
+  bool pressed=down&&!scanHotkeyHeld;scanHotkeyHeld=down;return pressed;
+ }
+ public bool ConsumeStartHotkey(){
+  bool down=(GetAsyncKeyState(0x76)&0x8000)!=0;
+  bool pressed=down&&!startHotkeyHeld;startHotkeyHeld=down;return pressed;
+ }
  void Key(bool up){
   var input=new INPUT[]{new INPUT{type=1,scan=0x39,flags=(uint)(8|(up?2:0))}};
   uint n=SendInput(1,input,40);if(n!=1)throw new Exception("发送空格键失败；请检查游戏与工具权限是否一致。");held=!up;
@@ -238,6 +268,44 @@ public sealed class AutoPlayer : IDisposable {
    clockBias=difference;Log("CLOCK CALIBRATION raw="+raw+" playerTime="+characterTime+" bias="+clockBias);
   }else{clockBias=0;Log("CLOCK CALIBRATION not needed raw="+raw+" playerTime="+characterTime+" difference="+difference);}
   player=candidate;playerBound=true;Log("PLAYER BOUND "+player.ToString("X")+" level="+level.ToString("X"));return true;
+ }
+ // When the player has deliberately left the scheduled route (for example to
+ // collect a diamond) the soundtrack clock alone is no longer a trustworthy
+ // resume cursor.  Re-anchor against the displayed route instead: find the
+ // closest real hint transform, then use its successor if that marker has
+ // already passed behind the current movement direction.
+ bool TryResumeAnchor(out int selected){
+  selected=-1;
+  if(!worldLayoutValid||!playerBound||times.Count<2)return false;
+  try{
+   long hero=Q(player+0xc8),tr=Q(hero+0x170),native=Q(tr+0x10);
+   if(Name(tr)!="Transform"||ComponentTransform(hero)!=native)throw new Exception("角色坐标引用不一致。");
+   V3 pos=World(native),d=ReadV(Read(player+0x44,12),0);
+   double len=Math.Sqrt(d.x*d.x+d.z*d.z);
+   if(len<0.1)throw new Exception("运动方向暂不可用。");
+   int best=-1;double bestScore=Double.MaxValue,bestDistance=0,bestForward=0,bestLateral=0;
+   for(int i=0;i<times.Count;i++){
+    long obj;if(!pointObjects.TryGetValue(times[i],out obj)||Q(obj+0x18)!=level)continue;
+    long hint=ComponentTransform(obj);
+    if(I(hint+0x20)!=2||Name(Q(hint+0x28))!="Transform")continue;
+    V3 goal=World(hint);
+    if(Math.Abs(goal.y-pos.y)>2.0)continue;
+    double dx=goal.x-pos.x,dz=goal.z-pos.z;
+    double distance=Math.Sqrt(dx*dx+dz*dz);
+    double forward=(dx*d.x+dz*d.z)/len,lateral=(dx*d.z-dz*d.x)/len;
+    // A marker slightly behind is still a useful anchor, but prefer an
+    // equally close marker on the currently travelled branch.
+    double score=distance+(forward<-0.35?2.0:0.0);
+    if(score<bestScore){best=i;bestScore=score;bestDistance=distance;bestForward=forward;bestLateral=lateral;}
+   }
+   // If no actual route marker is reasonably close, retain the old cursor.
+   // This is safer than guessing across a scene change or a different route.
+   if(best<0||bestDistance>45.0){Log("RESUME ANCHOR unavailable nearest="+best+" distance="+bestDistance);return false;}
+   selected=best;
+   if(bestForward<-0.35&&selected+1<times.Count)selected++;
+   Log("RESUME ANCHOR nearest="+best+" next="+selected+" distance="+bestDistance+" forward="+bestForward+" lateral="+bestLateral+" hero="+pos);
+   return true;
+  }catch(Exception ex){Log("RESUME ANCHOR unavailable "+ex.Message);return false;}
  }
  public bool PollSelection(){if(Running||invalidated||times.Count<2)return false;return !SelectionValid();}
  bool IsStraightLanding(float clock,int index,V3 pos,V3 goal,V3 d,double len,double forward,double lateral){
@@ -277,7 +345,7 @@ public sealed class AutoPlayer : IDisposable {
   if(haveGeometry){
    double dt=Math.Max(0,(now-geometryMs)/1000.0),jx=pos.x-lastGeometry.x,jz=pos.z-lastGeometry.z;
    double moved=Math.Sqrt(jx*jx+jz*jz),limit=observedSpeed*Math.Sqrt(2)*dt+3.0;
-   if(moved>limit){teleportUntil=now+100;Log("TELEPORT SUSPECT index="+index+" displacement="+moved+" expectedLimit="+limit+" from="+lastGeometry+" to="+pos);}
+   if(moved>limit){teleportUntil=now+100;teleportSkipIndex=index;Log("TELEPORT SUSPECT index="+index+" displacement="+moved+" expectedLimit="+limit+" from="+lastGeometry+" to="+pos);}
   }
   lastGeometry=pos;geometryMs=now;haveGeometry=true;
   if(now<teleportUntil)return false;
@@ -288,6 +356,26 @@ public sealed class AutoPlayer : IDisposable {
   if(Math.Abs(goal.y-pos.y)>2)return false;
   double dx=goal.x-pos.x,dz=goal.z-pos.z;
   double forward=(dx*d.x+dz*d.z)/len,lateral=(dx*d.z-dz*d.x)/len;
+  // A teleport can consume its own marker automatically. After the scene
+  // move, that old marker is often directly behind the character; retaining
+  // it would make the alignment guard wait until timeout. Only skip it when
+  // the teleport was just observed and it remains on the old route axis.
+  if(teleportSkipIndex==index){
+   teleportSkipIndex=-1;
+   if(forward<-0.7&&Math.Abs(lateral)<=0.8){
+    next=index+1;landingIndex=-1;alignmentIndex=-1;haveGeometry=false;
+    Log("TELEPORT PASS index="+index+" next="+next+" forward="+forward+" lateral="+lateral);
+    return false;
+   }
+  }
+  // A final displayed box can be a finish-line decoration rather than an
+  // input. If the last point remains on the current straight path, consume it
+  // without pressing so the character continues into the goal.
+  if(SkipTerminalStraightMarker&&index==times.Count-1&&clock>=target-0.2f&&forward>=0&&Math.Abs(lateral)<=0.4&&Math.Abs(goal.y-pos.y)<=1.0){
+   next=index+1;landingIndex=-1;alignmentIndex=-1;haveGeometry=false;
+   Log("TERMINAL STRAIGHT PASS index="+index+" forward="+forward+" lateral="+lateral);
+   return false;
+  }
   // This level family begins movement before the hint timestamp stream.  When
   // that one-second start-clock calibration was confirmed, keep using world
   // geometry for this route instead of arbitrarily limiting the correction to
@@ -343,11 +431,20 @@ public sealed class AutoPlayer : IDisposable {
   if(InputLeadMilliseconds<0||InputLeadMilliseconds>40)throw new Exception("按键提前量必须在 0 至 40 毫秒之间。");
   if(offsetMs< -500||offsetMs>100)throw new Exception("偏移超出范围。");
   if(!SelectionValid())throw new Exception(status);
-  landingIndex=-1;alignmentIndex=-1;airborneWatch=null;haveGeometry=false;teleportUntil=0;bridgeTurn=false;stop=false;next=0;previous=Clock();while(next<times.Count&&times[next]+offsetMs/1000f<previous-0.04f)next++;
+  landingIndex=-1;alignmentIndex=-1;airborneWatch=null;haveGeometry=false;teleportUntil=0;teleportSkipIndex=-1;bridgeTurn=false;stop=false;
+  bool resumeExisting=hasScheduleProgress&&playerBound&&next>=0&&next<times.Count;
+  previous=Clock();
+  if(resumeExisting){
+   int anchored;
+   if(TryResumeAnchor(out anchored)){next=anchored;Log("RESUME POSITION ANCHORED next="+next+" clock="+previous);}
+   else Log("RESUME SAVED INDEX next="+next+" clock="+previous);
+  }
+  else{next=0;while(next<times.Count&&times[next]+offsetMs/1000f<previous-0.04f)next++;Log("START INDEX BY CLOCK next="+next+" clock="+previous);}
+  hasScheduleProgress=true;
   worker=new Thread(()=>Loop(offsetMs)){IsBackground=true};worker.Start();
  }
  void Loop(int offsetMs){
-  Log("START offsetMs="+offsetMs+" skipStraightLanding="+SkipStraightLandingMarkers+" inputLeadMs="+InputLeadMilliseconds);status="等待游戏前台并开始/继续关卡；F8 停止。";
+  Log("START offsetMs="+offsetMs+" skipStraightLanding="+SkipStraightLandingMarkers+" skipTerminalStraight="+SkipTerminalStraightMarker+" inputLeadMs="+InputLeadMilliseconds);status="等待游戏前台并开始/继续关卡；F8 停止。";
   var heartbeat=Stopwatch.StartNew();long lastSample=-1000;string lastGate=null;
   try{
    while(!stop){
@@ -360,7 +457,7 @@ public sealed class AutoPlayer : IDisposable {
      Thread.Sleep(10);continue;
     }
     float t=Clock();
-    if(t<previous-0.2f){landingIndex=-1;haveGeometry=false;teleportUntil=0;airborneWatch=null;next=0;while(next<times.Count&&times[next]+offsetMs/1000f<t-0.04f)next++;Log("Timeline reset at "+t);}
+    if(t<previous-0.2f){landingIndex=-1;haveGeometry=false;teleportUntil=0;teleportSkipIndex=-1;airborneWatch=null;next=0;while(next<times.Count&&times[next]+offsetMs/1000f<t-0.04f)next++;Log("Timeline reset at "+t);}
     previous=t;
     bool fg=Foreground();byte ps=B(player+0x9c),pp=B(player+0x9d),ls=B(level+0x1a9),lp=B(level+0x1ab);
     string gate=!fg?"游戏不在前台":ps==0?"角色 started=0":pp!=0?"角色 paused="+pp:ls==0?"关卡 started=0":lp!=0?"关卡 paused="+lp:"ready";
@@ -401,4 +498,52 @@ public sealed class AutoPlayer : IDisposable {
  public void SaveLog(string path){lock(sync){File.WriteAllText(path,log.ToString(),Encoding.UTF8);}}
  void Disconnect(){if(handle!=IntPtr.Zero){CloseHandle(handle);handle=IntPtr.Zero;}if(process!=null){process.Dispose();process=null;}}
  public void Dispose(){Stop();Disconnect();}
+}
+
+// Separate transparent topmost window for status only. It neither renders into
+// Unity nor writes game memory, so turning it off simply hides this window.
+public sealed class AssistOverlay : Form {
+ [StructLayout(LayoutKind.Sequential)] struct RECT {public int Left,Top,Right,Bottom;}
+ [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h,out RECT r);
+ [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+ [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int cx,int cy,uint flags);
+ const int WS_EX_TRANSPARENT=0x20,WS_EX_TOOLWINDOW=0x80,WS_EX_NOACTIVATE=0x08000000;
+ const uint SWP_NOACTIVATE=0x10,SWP_SHOWWINDOW=0x40;
+ readonly Label title,state,details,keys,clickIcon;
+ public AssistOverlay(){
+  FormBorderStyle=FormBorderStyle.None;ShowInTaskbar=false;StartPosition=FormStartPosition.Manual;
+  TopMost=true;BackColor=Color.Magenta;TransparencyKey=Color.Magenta;Size=new Size(400,94);
+  var panel=new Panel();panel.Dock=DockStyle.Fill;panel.BackColor=Color.FromArgb(232,12,16,23);
+  title=new Label();title.SetBounds(12,7,340,22);title.ForeColor=Color.FromArgb(102,220,255);
+  title.Font=new Font("Microsoft YaHei UI",10F,FontStyle.Bold);title.Text="Dancing Line Assist";title.BackColor=Color.Transparent;
+  state=new Label();state.SetBounds(12,31,340,20);state.Font=new Font("Microsoft YaHei UI",9F,FontStyle.Bold);state.BackColor=Color.Transparent;
+  details=new Label();details.SetBounds(12,53,376,19);details.ForeColor=Color.FromArgb(230,235,242);
+  details.Font=new Font("Microsoft YaHei UI",8.5F,FontStyle.Regular);details.BackColor=Color.Transparent;
+  keys=new Label();keys.SetBounds(12,73,376,17);keys.ForeColor=Color.FromArgb(160,175,190);keys.Text="F6 识别   ·   F7 启动/恢复   ·   F8 停止";
+  keys.Font=new Font("Microsoft YaHei UI",8F,FontStyle.Regular);keys.BackColor=Color.Transparent;
+  clickIcon=new Label();clickIcon.SetBounds(354,27,32,28);clickIcon.TextAlign=ContentAlignment.MiddleCenter;
+  clickIcon.Font=new Font("Microsoft YaHei UI",16F,FontStyle.Bold);clickIcon.BackColor=Color.Transparent;
+  panel.Controls.Add(title);panel.Controls.Add(state);panel.Controls.Add(details);panel.Controls.Add(keys);panel.Controls.Add(clickIcon);Controls.Add(panel);
+ }
+ protected override CreateParams CreateParams {get{CreateParams p=base.CreateParams;p.ExStyle|=WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE;return p;}}
+ public void FollowGame(IntPtr game,int point,int count,bool running,bool inputHeld){
+  RECT r;
+  if(game==IntPtr.Zero||GetForegroundWindow()!=game||!GetWindowRect(game,out r)){if(Visible)Hide();return;}
+  int width=400,height=94,x=r.Left+18,y=r.Top+105;
+  if(r.Right-r.Left<width+36)x=r.Left+8;
+  if(r.Bottom-r.Top<y-r.Top+height+8)y=r.Top+8;
+  if(running){state.Text="自动游玩运行中";state.ForeColor=Color.FromArgb(107,232,160);}
+  else if(count>=2){state.Text="自动游玩待命";state.ForeColor=Color.FromArgb(178,190,202);}
+  else{state.Text="等待识别当前关卡";state.ForeColor=Color.FromArgb(178,190,202);}
+  // The click indication changes only this small icon; all text remains
+  // stable so brief internal state/log changes do not flash in recordings.
+  clickIcon.Text=inputHeld?"◆":"●";
+  clickIcon.ForeColor=inputHeld?Color.FromArgb(255,208,76):(running?Color.FromArgb(107,232,160):Color.FromArgb(115,130,145));
+  details.Text="自动游玩进度："+Math.Max(0,point)+" / "+count;
+  Rectangle wanted=new Rectangle(x,y,width,height);bool moved=Bounds!=wanted;
+  if(moved)Bounds=wanted;
+  if(!Visible){Show();SetWindowPos(Handle,new IntPtr(-1),x,y,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);}
+  else if(moved)SetWindowPos(Handle,new IntPtr(-1),x,y,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+ }
+ public void Disable(){if(Visible)Hide();}
 }
