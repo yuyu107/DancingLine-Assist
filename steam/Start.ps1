@@ -8,7 +8,7 @@ Add-Type -Path (Join-Path $PSScriptRoot 'HintMemory.cs')
 $auto=New-Object AutoPlayer
 $overlay=New-Object AssistOverlay
 $form=New-Object Windows.Forms.Form
-$form.Text='跳舞的线 Steam · 引导线与自动游玩 0.3.9 正式版'
+$form.Text='跳舞的线 Steam · 引导线与自动游玩 0.3.36 正式整合版'
 $form.ClientSize=New-Object Drawing.Size(640,490)
 $form.StartPosition='CenterScreen';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false
 $label=New-Object Windows.Forms.Label
@@ -21,6 +21,7 @@ function Add-Button($text,$x,$y,$handler){
 }
 Add-Button '应用引导线设置' 20 75 {try{$mode=1;if($defaultHint.Checked){$mode=2};$state.Text=[HintMemory]::Apply($mode)}catch{$state.Text=$_.Exception.GetBaseException().Message}}
 Add-Button '恢复引导线原规则' 225 75 {try{$state.Text=[HintMemory]::Apply(0)}catch{$state.Text=$_.Exception.GetBaseException().Message}}
+Add-Button '记录手动操作' 430 75 {try{$auto.StartManualRecord();$state.Text=$auto.Status}catch{$state.Text=$_.Exception.GetBaseException().Message}}
 $defaultHint=New-Object Windows.Forms.CheckBox
 $defaultHint.Text='进入关卡时尝试默认开启（可选；若路线未出现，需在游戏内关闭再开启）'
 $defaultHint.Checked=$false;$defaultHint.SetBounds(20,112,600,25);$form.Controls.Add($defaultHint)
@@ -37,14 +38,14 @@ function Start-AutoPlay {
  }catch{$state.Text=$_.Exception.GetBaseException().Message}
 }
 Add-Button '2. 启动自动游玩（F7）' 225 145 {Start-AutoPlay}
-Add-Button '停止自动游玩（F8）' 430 145 {$auto.Stop();$state.Text=$auto.Status}
+Add-Button '停止自动游玩（F8）' 430 145 {if($auto.ManualRecording){$auto.StopManualRecord()}else{$auto.Stop()};$state.Text=$auto.Status}
 $offsetLabel=New-Object Windows.Forms.Label;$offsetLabel.Text='时间窗口偏移（毫秒）';$offsetLabel.SetBounds(20,192,235,30);$form.Controls.Add($offsetLabel)
 $offset=New-Object Windows.Forms.NumericUpDown;$offset.Minimum=-500;$offset.Maximum=100;$offset.Increment=5;$offset.Value=-50;$offset.SetBounds(265,190,90,30);$form.Controls.Add($offset)
 Add-Button '导出运行日志' 430 185 {
  try{$p=Join-Path $PSScriptRoot ('Steam-AutoPlay-test-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.txt');$auto.SaveLog($p);$state.Text='已保存：'+$p}catch{$state.Text=$_.Exception.GetBaseException().Message}
 }
 $note=New-Object Windows.Forms.Label
-$note.Text="F6 识别当前关卡，F7 启动/恢复自动游玩，F8 停止；遮罩只显示工具状态，不修改游戏画面。`r`n独占全屏下遮罩可能不会显示；换关卡后仍需重新识别。"
+$note.Text="F6 识别，F7 自动游玩，F8 停止。记录手动操作：识别后点按钮，手动玩过该段，再按 F8 导出日志。`r`n记录空格/鼠标左键及 74～90 秒的位置；换关卡后仍需重新识别。"
 $note.SetBounds(20,420,600,55);$form.Controls.Add($note)
 $landingFilter=New-Object Windows.Forms.CheckBox
 $landingFilter.Text='跳过直行落点提示（实验；重新启动自动游玩生效）'
@@ -74,7 +75,7 @@ $timer.Add_Tick({
  if($scanHotkey -and -not $auto.Running -and -not $auto.Scanning){Scan-CurrentLevel}
  $startHotkey=$auto.ConsumeStartHotkey()
  if($startHotkey -and -not $auto.Running -and -not $auto.Scanning){Start-AutoPlay}
- if($overlayToggle.Checked){
+ if($overlayToggle.Checked -and -not $auto.ManualRecording){
   if($now -ge $script:nextGameProbe){try{$script:gameProc=Get-Process -Name 'Dancing Line' -ErrorAction Stop | Select-Object -First 1}catch{$script:gameProc=$null};$script:nextGameProbe=$now.AddSeconds(1)}
   if($null -ne $script:gameProc){try{$overlay.FollowGame($script:gameProc.MainWindowHandle,$auto.CurrentPoint,$auto.Count,$auto.Running,$auto.HasExecutedPoint,$auto.InputHeld)}catch{$overlay.Disable()}}
  }else{$overlay.Disable()}

@@ -1,6 +1,6 @@
-# Dancing Line Assist
+﻿# Dancing Line Assist
 
-《跳舞的线》引导线与自动游玩实验工具，分别支持**社区版 0.4.29**与**官方 Steam 版 0.3.9**。
+《跳舞的线》引导线与自动游玩实验工具，分别支持**社区版 0.4.36**与**官方 Steam 版 0.3.36**。
 
 提供引导线控制、关卡识别和基于引导点世界坐标的实验性自动转向。仅适配 README 所列校验对应的 Windows 64 位构建，不保证适配其他版本或所有关卡。
 
@@ -15,16 +15,18 @@
 
 | 版本 | 源码位置 | Release 附件 |
 | --- | --- | --- |
-| 社区版 0.4.29 | 仓库根目录 | `DancingLine-Assist-v0.5.0.zip` 内的 `Community/` |
-| 官方 Steam 版 0.3.9 | [`steam/`](steam/README.txt) | `DancingLine-Assist-v0.5.0.zip` 内的 `Steam/` |
+| 社区版 0.4.36 | 仓库根目录 | `DancingLine-Assist-v0.5.1.zip` 内的 `Community/` |
+| 官方 Steam 版 0.3.36 | [`steam/`](steam/README.txt) | `DancingLine-Assist-v0.5.1.zip` 内的 `Steam/` |
 
 两套实现的内存布局、文件校验和启动流程不同，不能混用。
+
+Steam 圣诞夜坐骑段已接入自动输入，但尚未完成整段通关验证；自动游玩仍是实验功能，个别关卡可能需要继续适配。
 
 ## 使用方法
 
 ### 1. 下载并启动对应版本
 
-从 [Releases](https://github.com/yuyu107/DancingLine-Assist/releases) 下载 `DancingLine-Assist-v0.5.0.zip`，完整解压后按游戏版本选择目录：
+从 [Releases](https://github.com/yuyu107/DancingLine-Assist/releases) 下载 `DancingLine-Assist-v0.5.1.zip`，完整解压后按游戏版本选择目录：
 
 | 游戏版本 | 启动文件 |
 | --- | --- |

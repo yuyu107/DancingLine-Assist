@@ -8,7 +8,7 @@ Add-Type -Path (Join-Path $PSScriptRoot 'AutoPlayer.cs') -ReferencedAssemblies $
 $auto=New-Object AutoPlayer
 $overlay=New-Object AssistOverlay
 $form=New-Object Windows.Forms.Form
-$form.Text='跳舞的线 · 引导线与自动游玩 0.4.29 正式版'
+$form.Text='跳舞的线 · 引导线与自动游玩 0.4.36 正式整合版'
 $form.ClientSize=New-Object Drawing.Size(640,490)
 $form.StartPosition='CenterScreen';$form.FormBorderStyle='FixedDialog';$form.MaximizeBox=$false
 $label=New-Object Windows.Forms.Label
@@ -72,7 +72,7 @@ $timer.Add_Tick({
  if(-not $auto.Running -and $auto.ConsumeStartHotkey()){Start-AutoPlay}
  if($overlayToggle.Checked){
   if($now -ge $script:nextGameProbe){try{$script:gameProc=Get-Process -Name 'Dancing Line' -ErrorAction Stop | Select-Object -First 1}catch{$script:gameProc=$null};$script:nextGameProbe=$now.AddSeconds(1)}
-  if($null -ne $script:gameProc){try{$overlay.FollowGame($script:gameProc.MainWindowHandle,$auto.CurrentPoint,$auto.Count,$auto.Running,$auto.InputHeld)}catch{$overlay.Disable()}}
+  if($null -ne $script:gameProc){try{$overlay.FollowGame($script:gameProc.MainWindowHandle,$auto.DisplayedPoint,$auto.Count,$auto.Running,$auto.InputHeld)}catch{$overlay.Disable()}}
  }else{$overlay.Disable()}
  if($now -ge $script:nextStatePoll){
   if($auto.PollSelection()){$state.Text=$auto.Status}

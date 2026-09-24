@@ -33,9 +33,43 @@ public sealed class AutoPlayer : IDisposable {
  V3 lastGeometry; bool haveGeometry; long geometryMs,teleportUntil; int teleportSkipIndex=-1; readonly Stopwatch geometryWatch=Stopwatch.StartNew();
  Stopwatch airborneWatch; bool worldLayoutValid; bool playerBound;
  volatile bool invalidated; long levelNative,soundNative,sceneNameRef;
- volatile bool stop,held; volatile string status="尚未识别关卡。"; bool bridgeTurn,hasScheduleProgress,scanHotkeyHeld,startHotkeyHeld; volatile int next; float previous,clockBias;
+ volatile bool stop,held,hasExecutedPoint; volatile string status="尚未识别关卡。"; bool bridgeTurn,hasScheduleProgress,scanHotkeyHeld,startHotkeyHeld; volatile int next; float previous,clockBias;
  readonly List<float> times=new List<float>(); readonly HashSet<long> visited=new HashSet<long>();
  readonly Dictionary<float,long> pointObjects=new Dictionary<float,long>();
+ readonly Dictionary<float,List<long>> verticalAlternates=new Dictionary<float,List<long>>();
+ readonly Dictionary<float,V3> recordedFlightPoints=new Dictionary<float,V3>();
+ // Verified manual flight, sampled at each actual left-click on a grounded platform.
+ // Apply only when the two source markers match this level's exact geometry.
+ static readonly float[,] recordedFlightRoute=new float[,] {
+  { 79.64482f, 44.94211f, -15.7949982f, 675.706543f },
+  { 80.08098f, 48.5408478f, -15.9950008f, 679.4075f },
+  { 80.92300f, 41.70341f, -17.495f, 686.5523f },
+  { 81.28041f, 44.53099f, -17.6950016f, 689.585f },
+  { 81.68629f, 41.0865555f, -17.895f, 693.029f },
+  { 82.86149f, 50.8542366f, -22.1950016f, 703.0009f },
+  { 83.27947f, 47.5126572f, -22.4250011f, 706.5476f },
+  { 84.12150f, 54.5556068f, -23.915f, 713.692444f },
+  { 84.50919f, 51.26544f, -24.1150017f, 716.9822f },
+  { 84.88477f, 54.2472153f, -24.315f, 720.169f },
+  { 85.67228f, 47.6669235f, -25.7650013f, 726.851257f },
+  { 86.07815f, 51.0085f, -25.965f, 730.295166f },
+  { 86.46584f, 47.82123f, -26.165f, 733.5849f },
+  { 87.28969f, 54.5044327f, -27.795f, 740.575439f },
+  { 87.68951f, 51.2142944f, -27.995f, 743.968f },
+  { 88.08932f, 54.50437f, -28.1950016f, 747.360535f },
+  { 88.88288f, 47.76984f, -29.715f, 754.0941f },
+  { 89.71885f, 54.7613831f, -31.225f, 761.187561f },
+  { 90.10654f, 51.47121f, -31.425f, 764.4773f },
+  { 90.50030f, 54.6070328f, -31.625f, 767.818359f },
+  { 90.93645f, 51.2140121f, -31.825f, 771.5193f },
+  { 91.71185f, 57.69141f, -32.9095f, 778.097534f },
+  { 92.09953f, 54.60693f, -32.9095f, 781.384949f },
+  { 92.47511f, 57.7942162f, -32.9095f, 784.5695f },
+  { 92.87492f, 54.606926f, -32.9095f, 787.9602f },
+  { 93.30503f, 58.15405f, -32.9095f, 791.607239f },
+  { 93.69273f, 54.96673f, -32.9095f, 794.8949f },
+  { 94.08042f, 58.15406f, -32.9095f, 798.182556f },
+ };
  readonly Dictionary<long,bool> targetTypes=new Dictionary<long,bool>();
  readonly StringBuilder log=new StringBuilder(); readonly object sync=new object();
  string stage="idle"; readonly Dictionary<long,int> owners=new Dictionary<long,int>();
@@ -43,6 +77,7 @@ public sealed class AutoPlayer : IDisposable {
  public int Count {get{return times.Count;}} public bool Running {get{return worker!=null&&worker.IsAlive;}}
  public bool InputHeld {get{return held;}}
  public int CurrentPoint {get{return next;}}
+ public int DisplayedPoint {get{return hasExecutedPoint?next:0;}}
  void Log(string s){lock(sync){
   if(log.Length>1800000){int cut=log.ToString().IndexOf('\n',600000);if(cut>=0){log.Remove(0,cut+1);log.Insert(0,"[Earlier log entries trimmed; latest events retained]\r\n");}}
   log.AppendLine(DateTime.Now.ToString("HH:mm:ss.fff")+" "+s);
@@ -97,7 +132,7 @@ public sealed class AutoPlayer : IDisposable {
   if(IsHintPoint(k)){
    float t=F(obj+0x4c);long owner=Q(obj+0x18);
    Log("Hint point type="+name+" time="+t.ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" owner="+owner.ToString("X")+" ownerType="+Name(owner)+" matchesPlayerLevel="+(owner==level));
-   if(!float.IsNaN(t)&&!float.IsInfinity(t)&&t>0.005f&&t<3600){times.Add(t);pointObjects[t]=obj;if(!owners.ContainsKey(owner))owners[owner]=0;owners[owner]++;}
+   if(!float.IsNaN(t)&&!float.IsInfinity(t)&&t>0.005f&&t<3600){long old;if(pointObjects.TryGetValue(t,out old)&&old!=obj){V3 a=World(ComponentTransform(old)),b=World(ComponentTransform(obj));double dx=a.x-b.x,dz=a.z-b.z,dy=a.y-b.y;if(Math.Sqrt(dx*dx+dz*dz)<0.5&&Math.Abs(dy)>5&&TryQ(old+0x18)==owner){List<long> alternatives;if(!verticalAlternates.TryGetValue(t,out alternatives)){alternatives=new List<long>{old};verticalAlternates[t]=alternatives;}alternatives.Add(obj);Log("VERTICAL ALTERNATE time="+t.ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" first="+a+" second="+b);return;}if(Math.Abs(dx)+Math.Abs(dy)+Math.Abs(dz)>0.05){Log("AMBIGUOUS SAME TIME time="+t.ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" first="+old.ToString("X")+" pos="+a+" second="+obj.ToString("X")+" pos="+b+" firstOwner="+TryQ(old+0x18).ToString("X")+" secondOwner="+owner.ToString("X")+" collected="+times.Count);throw new Exception("同时间引导点位置不同（"+t.ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" 秒），已停止自动选择；请导出日志。");}return;}times.Add(t);pointObjects[t]=obj;if(!owners.ContainsKey(owner))owners[owner]=0;owners[owner]++;}
    return;
   }
   if(name.EndsWith("[]")){
@@ -124,7 +159,7 @@ public sealed class AutoPlayer : IDisposable {
  long Singleton(long rva){long mi=Q(module+rva);long klass=Q(Q(Q(mi+0x20)+0xc0));return Q(Q(klass+0xb8));}
  public string Scan(){
   if(Running)throw new Exception("请先停止自动游玩。");
-  Disconnect();invalidated=true;playerBound=false;player=0;level=0;clockBias=0;hasScheduleProgress=false;next=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.29");
+  Disconnect();invalidated=true;playerBound=false;player=0;level=0;clockBias=0;hasScheduleProgress=false;hasExecutedPoint=false;next=0;times.Clear();visited.Clear();targetTypes.Clear();owners.Clear();pointObjects.Clear();verticalAlternates.Clear();recordedFlightPoints.Clear();reads=0;stage="attach";Log("SCAN BEGIN build=0.4.36-test");
   if(IntPtr.Size!=8)throw new Exception("需要 64 位 PowerShell。");
   var ps=Process.GetProcessesByName("Dancing Line");if(ps.Length!=1)throw new Exception("请只打开一个社区版游戏。");process=ps[0];
   var m=process.Modules.Cast<ProcessModule>().FirstOrDefault(x=>x.ModuleName.Equals("GameAssembly.dll",StringComparison.OrdinalIgnoreCase));
@@ -168,6 +203,10 @@ public sealed class AutoPlayer : IDisposable {
      if(span>5.0){Log("DROP DENSE REMOTE time="+times[i].ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" previous="+times[i-1].ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" gap="+gap.ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" span="+span);pointObjects.Remove(times[i]);times.RemoveAt(i);}
     }catch(Exception ex){Log("DENSE POINT GEOMETRY unavailable "+ex.Message);}
    }
+   DropOpeningStartMarker();
+   DropThirdLevelOriginPoint();
+   ApplyRecordedFlightRoute();
+   ApplyOpeningCorner();
    if(times.Count<2)throw new Exception("未识别到足够的引导点；请导出日志，不会自动按键。");
    // A nominal 0.04-second spacing may be represented as 0.03999996 in
    // single precision.  Treat only genuinely tighter pairs as unsupported.
@@ -179,6 +218,76 @@ public sealed class AutoPlayer : IDisposable {
    status="识别到 "+times.Count+" 个候选时间点（实验模式，需实测）。";Log(status);return status;
   }catch(Exception ex){times.Clear();status=ex.Message;Log("SCAN ERROR stage="+stage+" "+ex.ToString());throw;}
   finally{scanClock=null;}
+ }
+ void DropOpeningStartMarker(){
+  if(!worldLayoutValid||times.Count<4||Math.Abs(times[0]-0.05144478f)>0.002f||
+     Math.Abs(times[1]-2.380846f)>0.002f||Math.Abs(times[2]-2.711727f)>0.002f)return;
+  float start=times[0];long obj;if(!pointObjects.TryGetValue(start,out obj))return;
+  V3 p=World(ComponentTransform(obj));
+  if(Math.Abs(p.x-0.4369972f)>0.15f||Math.Abs(p.y-0.85256f)>0.15f||Math.Abs(p.z-0.4365234f)>0.15f)return;
+  Log("DROP OPENING START MARKER time="+start.ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" pos="+p);
+  pointObjects.Remove(start);times.RemoveAt(0);
+ }
+ void DropThirdLevelOriginPoint(){
+  // This level's 2.749s hint stays at the origin, behind the running character.
+  // Gate on its opening timestamps and measured coordinates to avoid other routes.
+  if(!worldLayoutValid||times.Count<5||Math.Abs(times[0]-1.04532886f)>0.002f||Math.Abs(times[1]-1.53598642f)>0.002f||Math.Abs(times[2]-2.03732419f)>0.002f)return;
+  float stale=2.74931979f;long obj;
+  if(!pointObjects.TryGetValue(stale,out obj))return;
+  V3 p=World(ComponentTransform(obj));
+  if(Math.Abs(p.x-13.15)>0.15||Math.Abs(p.y-1.05)>0.15||Math.Abs(p.z)>0.15)return;
+  Log("DROP VERIFIED ORIGIN POINT time="+stale.ToString("R",System.Globalization.CultureInfo.InvariantCulture)+" pos="+p);
+  pointObjects.Remove(stale);times.Remove(stale);
+ }
+ void ApplyRecordedFlightRoute(){
+  recordedFlightPoints.Clear();
+  // The delegate snapshot varies: the inactive lower route's 84.849 marker
+  // may be present or absent. Identify this route by the upper exit and the
+  // first verified native point after the recorded section instead.
+  long exit;
+  if(!worldLayoutValid||!pointObjects.TryGetValue(78.44917f,out exit))return;
+  V3 upper=World(ComponentTransform(exit));
+  long resumedHint;
+  if(!pointObjects.TryGetValue(94.84914f,out resumedHint))return;
+  V3 resumed=World(ComponentTransform(resumedHint));
+  if(Math.Abs(upper.x-54.7233f)>0.5||Math.Abs(upper.z-665.6633f)>0.5||
+     Math.Abs(resumed.x-51.329f)>0.5||Math.Abs(resumed.y+33.35f)>1||Math.Abs(resumed.z-804.822f)>0.5)return;
+  List<long> layers;
+  bool upperAvailable=Math.Abs(upper.y+11.95f)<1;
+  if(verticalAlternates.TryGetValue(78.44917f,out layers))upperAvailable=upperAvailable||layers.Any(p=>Math.Abs(World(ComponentTransform(p)).y+11.95f)<1);
+  if(!upperAvailable)throw new Exception("飞行路线的上层出口引导点未加载完整，请重新识别，不会使用缺失的时间表。");
+  for(int i=times.Count-1;i>=0;i--)if(times[i]>78.44917f&&times[i]<=94.1f)times.RemoveAt(i);
+  for(int i=0;i<recordedFlightRoute.GetLength(0);i++){
+   float t=recordedFlightRoute[i,0];V3 pos=new V3(recordedFlightRoute[i,1],recordedFlightRoute[i,2],recordedFlightRoute[i,3]);
+   times.Add(t);recordedFlightPoints.Add(t,pos);
+  }
+  times.Sort();
+  Log("RECORDED FLIGHT ROUTE points="+recordedFlightPoints.Count+"; native route resumes at 94.84914 goal="+resumed);
+ }
+ void ApplyOpeningCorner(){
+  // The first visible marker of this level is the SECOND corner. Starting
+  // along +X,+Z and then turning to -X,+Z, the missing corner is the
+  // intersection of x=z with x+z=first.x+first.z.
+  if(!worldLayoutValid||times.Count<2||Math.Abs(times[0]-0.9395832f)>0.002f)return;
+  long obj;if(!pointObjects.TryGetValue(times[0],out obj))return;
+  V3 first=World(ComponentTransform(obj));
+  if(Math.Abs(first.x+1.025305f)>0.3f||Math.Abs(first.z-7.972629f)>0.3f||Math.Abs(first.y-0.1f)>0.5f)return;
+  float corner=(first.x+first.z)*0.5f;
+  if(corner<3f||corner>4f)throw new Exception("开局转向几何不一致，请导出日志。");
+  float t=0.4095f;
+  times.Add(t);times.Sort();recordedFlightPoints.Add(t,new V3(corner,first.y,corner));
+  Log("OPENING CORNER restored time="+t+" position="+recordedFlightPoints[t]+" firstNative="+first);
+ }
+ long PointAtHeight(float time,V3 playerPosition){
+  long chosen;if(!pointObjects.TryGetValue(time,out chosen))throw new Exception("缺少对应引导点。");
+  List<long> alternatives;if(!verticalAlternates.TryGetValue(time,out alternatives))return chosen;
+  double closest=double.MaxValue,second=double.MaxValue;long best=0;
+  foreach(long candidate in alternatives){
+   V3 location=World(ComponentTransform(candidate));double gap=Math.Abs(location.y-playerPosition.y);
+   if(gap<closest){second=closest;closest=gap;best=candidate;}else if(gap<second)second=gap;
+  }
+  if(closest>5||second-closest<2)throw new Exception("角色高度无法确定当前引导点所在层，已停止；请导出日志。");
+  return best;
  }
  float RawClock(){stage="music clock";float t=(F(sound+0xac)-F(sound+0x60)+F(level+0x114))*F(level+0x28);if(float.IsNaN(t)||float.IsInfinity(t)||t< -120||t>7200)throw new Exception("游戏时间异常。");return t;}
  float Clock(){return RawClock()+clockBias;}
@@ -310,9 +419,10 @@ public sealed class AutoPlayer : IDisposable {
  public bool PollSelection(){if(Running||invalidated||times.Count<2)return false;return !SelectionValid();}
  bool IsStraightLanding(float clock,int index,V3 pos,V3 goal,V3 d,double len,double forward,double lateral){
   if(!SkipStraightLandingMarkers||landingIndex!=index||clock<landingClock||clock-landingClock>0.35f||index+1>=times.Count)return false;
+  if(recordedFlightPoints.ContainsKey(times[index])||recordedFlightPoints.ContainsKey(times[index+1]))return false;
   if(forward< -0.5||Math.Abs(lateral)>0.4||Math.Abs(goal.y-pos.y)>0.8)return false;
   float gap=times[index+1]-times[index];if(gap<0.08f||gap>1.5f)return false;
-  long obj;if(!pointObjects.TryGetValue(times[index+1],out obj)||Q(obj+0x18)!=level)return false;
+  long obj;obj=PointAtHeight(times[index+1],pos);if(Q(obj+0x18)!=level)return false;
   long tr=ComponentTransform(obj);
   if(I(tr+0x20)!=2||Name(Q(tr+0x28))!="Transform")return false;
   V3 follow=World(tr);double sx=follow.x-goal.x,sz=follow.z-goal.z,span=Math.Sqrt(sx*sx+sz*sz);
@@ -335,10 +445,13 @@ public sealed class AutoPlayer : IDisposable {
   if(beforeHintWindow&&!calibratedRoute)return false;
   long hero=Q(player+0xc8),tr=Q(hero+0x170),native=Q(tr+0x10),obj;
   if(Name(tr)!="Transform"||ComponentTransform(hero)!=native)throw new Exception("角色坐标引用不一致。");
-  if(!pointObjects.TryGetValue(times[index],out obj))throw new Exception("缺少对应引导点。");
-  long hint=ComponentTransform(obj);
-  if(I(hint+0x20)!=2||Name(Q(hint+0x28))!="Transform")throw new Exception("引导点坐标类型不匹配。");
-  V3 pos=World(native),goal=World(hint),d=ReadV(Read(player+0x44,12),0);
+  V3 pos=World(native),goal;
+  if(!recordedFlightPoints.TryGetValue(times[index],out goal)){
+   obj=PointAtHeight(times[index],pos);long hint=ComponentTransform(obj);
+   if(I(hint+0x20)!=2||Name(Q(hint+0x28))!="Transform")throw new Exception("引导点坐标类型不匹配。");
+   goal=World(hint);
+  }
+  V3 d=ReadV(Read(player+0x44,12),0);
   long now=geometryWatch.ElapsedMilliseconds;
   float observedSpeed=F(player+0x128);
   if(float.IsNaN(observedSpeed)||observedSpeed<=0||observedSpeed>100)throw new Exception("移动速度异常。");
@@ -353,7 +466,13 @@ public sealed class AutoPlayer : IDisposable {
   if(len<0.1||Math.Abs(d.y)>0.1)throw new Exception("落地后的运动方向暂不受支持，请导出日志。");
   // A lower platform can be visible before the character leaves the current one.
   // Wait within the existing time window instead of stopping on height alone.
-  if(Math.Abs(goal.y-pos.y)>2)return false;
+  // This level's turn at 70.749s is recorded on the lower platform. The
+  // character must turn at its horizontal corner before reaching that height.
+  bool verifiedLowerCorner=index+1<times.Count&&times.Count>95&&Math.Abs(times[0]-2.380846f)<0.002f&&
+   Math.Abs(times[index]-70.74983f)<0.002f&&Math.Abs(times[index+1]-72.09189f)<0.002f&&
+   Math.Abs(goal.x+8.013403f)<0.2f&&Math.Abs(goal.y+22.800001f)<0.2f&&
+   Math.Abs(goal.z-600.3323f)<0.2f&&Math.Abs(pos.y+19.9f)<0.6f;
+  if(Math.Abs(goal.y-pos.y)>2&&!verifiedLowerCorner)return false;
   double dx=goal.x-pos.x,dz=goal.z-pos.z;
   double forward=(dx*d.x+dz*d.z)/len,lateral=(dx*d.z-dz*d.x)/len;
   // A teleport can consume its own marker automatically. After the scene
@@ -371,9 +490,12 @@ public sealed class AutoPlayer : IDisposable {
   // A final displayed box can be a finish-line decoration rather than an
   // input. If the last point remains on the current straight path, consume it
   // without pressing so the character continues into the goal.
-  if(SkipTerminalStraightMarker&&index==times.Count-1&&clock>=target-0.2f&&forward>=0&&Math.Abs(lateral)<=0.4&&Math.Abs(goal.y-pos.y)<=1.0){
+  bool verifiedStraightFinish=times.Count==314&&Math.Abs(times[0]-0.9864139f)<0.002f&&
+   Math.Abs(times[178]-62.75572f)<0.002f&&Math.Abs(times[179]-63.62782f)<0.002f&&
+   Math.Abs(times[times.Count-1]-106.5869f)<0.002f;
+  if((SkipTerminalStraightMarker||verifiedStraightFinish)&&index==times.Count-1&&clock>=target-0.2f&&forward>=0&&Math.Abs(lateral)<=0.4&&Math.Abs(goal.y-pos.y)<=1.0){
    next=index+1;landingIndex=-1;alignmentIndex=-1;haveGeometry=false;
-   Log("TERMINAL STRAIGHT PASS index="+index+" forward="+forward+" lateral="+lateral);
+   Log("TERMINAL STRAIGHT PASS index="+index+" forward="+forward+" lateral="+lateral+" verifiedRoute="+verifiedStraightFinish);
    return false;
   }
   // This level family begins movement before the hint timestamp stream.  When
@@ -408,6 +530,22 @@ public sealed class AutoPlayer : IDisposable {
   double lead=Math.Min(0.4,speed*Math.Sqrt(2)*InputLeadMilliseconds/1000.0);
   // Small boundary allowance only for the current point within 0.5s of landing.
   bool recentLanding=landingIndex==index&&clock>=landingClock&&clock-landingClock<=0.5f;
+  // The 62.755s box is a landing marker. The next box continues along the
+  // current +X,+Z heading; turning at landing sends the character off the path.
+  if(recentLanding&&index+1<times.Count&&times.Count>179&&
+     Math.Abs(times[0]-0.9864139f)<0.002f&&Math.Abs(times[index]-62.75572f)<0.002f&&
+     Math.Abs(times[index+1]-63.62782f)<0.002f&&
+     Math.Abs(goal.x-13.08001f)<0.2f&&Math.Abs(goal.y+63.416f)<0.2f&&Math.Abs(goal.z-532.50006f)<0.2f&&
+     forward>=-1.5&&forward<0&&Math.Abs(lateral)<0.4&&Math.Abs(goal.y-pos.y)<0.8){
+   long followPoint=PointAtHeight(times[index+1],pos);
+   V3 follow=World(ComponentTransform(followPoint));
+   double fx=follow.x-goal.x,fz=follow.z-goal.z,span=Math.Sqrt(fx*fx+fz*fz);
+   if(Math.Abs(follow.x-20.48000f)<0.2f&&Math.Abs(follow.y+63.416f)<0.2f&&Math.Abs(follow.z-539.9f)<0.2f&&
+      span>5&&((fx*d.x+fz*d.z)/(span*len))>0.995){
+    Log("VERIFIED LANDING PASS index="+index+" clock="+clock+" forward="+forward+" next="+(index+1));
+    next=index+1;landingIndex=-1;alignmentIndex=-1;haveGeometry=false;return false;
+   }
+  }
   double lateralLimit=recentLanding?1.05:1.0;
   if(Math.Abs(lateral)>lateralLimit||forward< -0.7){
    if(alignmentIndex!=index){alignmentIndex=index;Log("ALIGNMENT WAIT index="+index+" clock="+clock+" deadline="+deadline+" calibratedRoute="+calibratedRoute+" forward="+forward+" lateral="+lateral);}
@@ -433,6 +571,7 @@ public sealed class AutoPlayer : IDisposable {
   if(!SelectionValid())throw new Exception(status);
   landingIndex=-1;alignmentIndex=-1;airborneWatch=null;haveGeometry=false;teleportUntil=0;teleportSkipIndex=-1;bridgeTurn=false;stop=false;
   bool resumeExisting=hasScheduleProgress&&playerBound&&next>=0&&next<times.Count;
+  if(!resumeExisting)hasExecutedPoint=false;
   previous=Clock();
   if(resumeExisting){
    int anchored;
@@ -457,7 +596,7 @@ public sealed class AutoPlayer : IDisposable {
      Thread.Sleep(10);continue;
     }
     float t=Clock();
-    if(t<previous-0.2f){landingIndex=-1;haveGeometry=false;teleportUntil=0;teleportSkipIndex=-1;airborneWatch=null;next=0;while(next<times.Count&&times[next]+offsetMs/1000f<t-0.04f)next++;Log("Timeline reset at "+t);}
+    if(t<previous-0.2f){landingIndex=-1;haveGeometry=false;teleportUntil=0;teleportSkipIndex=-1;airborneWatch=null;hasExecutedPoint=false;next=0;while(next<times.Count&&times[next]+offsetMs/1000f<t-0.04f)next++;Log("Timeline reset at "+t);}
     previous=t;
     bool fg=Foreground();byte ps=B(player+0x9c),pp=B(player+0x9d),ls=B(level+0x1a9),lp=B(level+0x1ab);
     string gate=!fg?"游戏不在前台":ps==0?"角色 started=0":pp!=0?"角色 paused="+pp:ls==0?"关卡 started=0":lp!=0?"关卡 paused="+lp:"ready";
@@ -487,6 +626,7 @@ public sealed class AutoPlayer : IDisposable {
      bool keepCurrent=bridgeTurn;bridgeTurn=false;
      Log("Key "+next+" gameTime="+t+" target="+target+(keepCurrent?" bridge=keep_current":""));
      if(!keepCurrent)next++;else{landingIndex=-1;alignmentIndex=-1;haveGeometry=false;}
+     hasExecutedPoint=true;
      status="自动游玩："+next+" / "+times.Count+"；F8 停止。";
     }
     Thread.Sleep(1);
@@ -510,26 +650,30 @@ public sealed class AssistOverlay : Form {
  const int WS_EX_TRANSPARENT=0x20,WS_EX_TOOLWINDOW=0x80,WS_EX_NOACTIVATE=0x08000000;
  const uint SWP_NOACTIVATE=0x10,SWP_SHOWWINDOW=0x40;
  readonly Label title,state,details,keys,clickIcon;
+ readonly Panel progressTrack,progressFill;
  public AssistOverlay(){
   FormBorderStyle=FormBorderStyle.None;ShowInTaskbar=false;StartPosition=FormStartPosition.Manual;
-  TopMost=true;BackColor=Color.Magenta;TransparencyKey=Color.Magenta;Size=new Size(400,94);
+  TopMost=true;BackColor=Color.Magenta;TransparencyKey=Color.Magenta;Size=new Size(400,114);
   var panel=new Panel();panel.Dock=DockStyle.Fill;panel.BackColor=Color.FromArgb(232,12,16,23);
   title=new Label();title.SetBounds(12,7,340,22);title.ForeColor=Color.FromArgb(102,220,255);
   title.Font=new Font("Microsoft YaHei UI",10F,FontStyle.Bold);title.Text="Dancing Line Assist";title.BackColor=Color.Transparent;
   state=new Label();state.SetBounds(12,31,340,20);state.Font=new Font("Microsoft YaHei UI",9F,FontStyle.Bold);state.BackColor=Color.Transparent;
   details=new Label();details.SetBounds(12,53,376,19);details.ForeColor=Color.FromArgb(230,235,242);
   details.Font=new Font("Microsoft YaHei UI",8.5F,FontStyle.Regular);details.BackColor=Color.Transparent;
-  keys=new Label();keys.SetBounds(12,73,376,17);keys.ForeColor=Color.FromArgb(160,175,190);keys.Text="F6 识别   ·   F7 启动/恢复   ·   F8 停止";
+  progressTrack=new Panel();progressTrack.SetBounds(12,78,376,8);progressTrack.BackColor=Color.FromArgb(53,64,77);
+  progressFill=new Panel();progressFill.SetBounds(0,0,0,8);progressFill.BackColor=Color.FromArgb(84,213,159);
+  progressTrack.Controls.Add(progressFill);
+  keys=new Label();keys.SetBounds(12,91,376,17);keys.ForeColor=Color.FromArgb(160,175,190);keys.Text="F6 识别   ·   F7 启动/恢复   ·   F8 停止";
   keys.Font=new Font("Microsoft YaHei UI",8F,FontStyle.Regular);keys.BackColor=Color.Transparent;
   clickIcon=new Label();clickIcon.SetBounds(354,27,32,28);clickIcon.TextAlign=ContentAlignment.MiddleCenter;
   clickIcon.Font=new Font("Microsoft YaHei UI",16F,FontStyle.Bold);clickIcon.BackColor=Color.Transparent;
-  panel.Controls.Add(title);panel.Controls.Add(state);panel.Controls.Add(details);panel.Controls.Add(keys);panel.Controls.Add(clickIcon);Controls.Add(panel);
+  panel.Controls.Add(title);panel.Controls.Add(state);panel.Controls.Add(details);panel.Controls.Add(progressTrack);panel.Controls.Add(keys);panel.Controls.Add(clickIcon);Controls.Add(panel);
  }
  protected override CreateParams CreateParams {get{CreateParams p=base.CreateParams;p.ExStyle|=WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE;return p;}}
  public void FollowGame(IntPtr game,int point,int count,bool running,bool inputHeld){
   RECT r;
   if(game==IntPtr.Zero||GetForegroundWindow()!=game||!GetWindowRect(game,out r)){if(Visible)Hide();return;}
-  int width=400,height=94,x=r.Left+18,y=r.Top+105;
+  int width=400,height=114,x=r.Left+18,y=r.Top+105;
   if(r.Right-r.Left<width+36)x=r.Left+8;
   if(r.Bottom-r.Top<y-r.Top+height+8)y=r.Top+8;
   if(running){state.Text="自动游玩运行中";state.ForeColor=Color.FromArgb(107,232,160);}
@@ -539,7 +683,11 @@ public sealed class AssistOverlay : Form {
   // stable so brief internal state/log changes do not flash in recordings.
   clickIcon.Text=inputHeld?"◆":"●";
   clickIcon.ForeColor=inputHeld?Color.FromArgb(255,208,76):(running?Color.FromArgb(107,232,160):Color.FromArgb(115,130,145));
-  details.Text="自动游玩进度："+Math.Max(0,point)+" / "+count;
+  int completed=Math.Max(0,Math.Min(point,count));
+  int percent=count>0?(int)Math.Round(100.0*completed/count):0;
+  details.Text="自动游玩进度："+completed+" / "+count+"   "+percent+"%";
+  int filled=count>0?(int)Math.Round(376.0*completed/count):0;
+  if(progressFill.Width!=filled)progressFill.Width=filled;
   Rectangle wanted=new Rectangle(x,y,width,height);bool moved=Bounds!=wanted;
   if(moved)Bounds=wanted;
   if(!Visible){Show();SetWindowPos(Handle,new IntPtr(-1),x,y,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);}
